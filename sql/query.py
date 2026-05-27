@@ -6,6 +6,9 @@ import time
 import traceback
 
 import simplejson as json
+import sqlparse
+from sqlparse.sql import IdentifierList, Identifier
+from sqlparse.tokens import Keyword, DML
 from django.contrib.auth.decorators import permission_required
 from django.db import connection, close_old_connections
 from django.db.models import Q
@@ -16,11 +19,52 @@ from common.utils.openai import OpenaiClient, check_openai_config
 from common.utils.timer import FuncTimer
 from sql.query_privileges import query_priv_check
 from sql.utils.resource_group import user_instances
+from sql.models import InstanceTag
 from sql.utils.tasks import add_kill_conn_schedule, del_schedule
 from .models import QueryLog, Instance
 from sql.engines import get_engine
 
 logger = logging.getLogger("default")
+
+
+def extract_table_names(sql):
+    """
+    从 SQL 中提取涉及的所有表名（去别名、去库名前缀）。
+    用于 read_view 视图校验，覆盖 from/join/逗号分隔等常见写法。
+    """
+    tables = set()
+    for statement in sqlparse.parse(sql):
+        from_seen = False
+        for token in statement.tokens:
+            if token.is_whitespace:
+                continue
+            if from_seen:
+                if isinstance(token, IdentifierList):
+                    for identifier in token.get_identifiers():
+                        name = _real_name(identifier)
+                        if name:
+                            tables.add(name)
+                    from_seen = False
+                elif isinstance(token, Identifier):
+                    name = _real_name(token)
+                    if name:
+                        tables.add(name)
+                    from_seen = False
+                elif token.ttype is Keyword:
+                    from_seen = False
+            if token.ttype is Keyword and (
+                token.value.upper() == "FROM" or "JOIN" in token.value.upper()
+            ):
+                from_seen = True
+    return tables
+
+
+def _real_name(identifier):
+    """取出真正的表名，去掉别名和库名前缀；子查询返回 None。"""
+    if identifier.is_group and identifier.token_first(skip_cm=True).ttype is DML:
+        return None
+    name = identifier.get_real_name()
+    return name.lower() if name else None
 
 
 @permission_required("sql.query_submit", raise_exception=True)
@@ -80,6 +124,24 @@ def query(request):
             result["status"] = priv_check_info["status"]
             result["msg"] = priv_check_info["msg"]
             return HttpResponse(json.dumps(result), content_type="application/json")
+
+        # read_view 标签实例：仅允许查询以 v_ 前缀的视图
+        is_readview = instance.instance_tag.filter(
+            tag_code="read_view", active=True
+        ).exists()
+        if is_readview:
+            tables = extract_table_names(sql_content)
+            invalid_tables = [t for t in tables if not t.startswith("v_")]
+            if invalid_tables:
+                result["status"] = 1
+                result["msg"] = (
+                    f"该实例为只读视图实例，只可查询视图（v_ 前缀），"
+                    f"以下对象不是视图：{', '.join(invalid_tables)}"
+                )
+                return HttpResponse(
+                    json.dumps(result), content_type="application/json"
+                )
+
         # explain的limit_num设置为0
         limit_num = 0 if re.match(r"^explain", sql_content.lower()) else limit_num
 

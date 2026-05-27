@@ -16,6 +16,7 @@ from sql.utils.sql_utils import get_syntax_type, remove_comments
 from . import EngineBase
 from .models import ResultSet, ReviewResult, ReviewSet
 from sql.utils.data_masking import data_masking
+from sql.models import InstanceTag
 from common.config import SysConfig
 
 logger = logging.getLogger("default")

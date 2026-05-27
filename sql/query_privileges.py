@@ -57,7 +57,7 @@ def query_priv_check(user, instance, db_name, sql_content, limit_num):
         return result
     # 如果有can_query_resource_group_instance, 视为资源组管理员, 可查询资源组内所有实例数据
     if user.has_perm("sql.query_resource_group_instance"):
-        if user_instances(user, tag_codes=["can_read"]).filter(pk=instance.pk).exists():
+        if user_instances(user, tag_codes=["can_read","read_view"]).filter(pk=instance.pk).exists():
             priv_limit = int(SysConfig().get("admin_query_limit", 5000))
             result["data"]["limit_num"] = (
                 min(priv_limit, limit_num) if limit_num else priv_limit
@@ -230,7 +230,7 @@ def query_priv_apply(request):
             result["msg"] = "请填写完整"
             return HttpResponse(json.dumps(result), content_type="application/json")
     try:
-        user_instances(request.user, tag_codes=["can_read"]).get(
+        user_instances(request.user, tag_codes=["can_read","read_view"]).get(
             instance_name=instance_name
         )
     except Instance.DoesNotExist:
